@@ -1,0 +1,10 @@
+{
+  "name": "kyvirok",
+  "interface": { "displayName": "kyvirok" },
+  "plugins": [{
+    "name": "kyvirok-1c",
+    "source": { "source": "local", "path": "./plugins/kyvirok-1c" },
+    "policy": { "installation": "AVAILABLE", "authentication": "ON_USE" },
+    "category": "Productivity"
+  }]
+}
