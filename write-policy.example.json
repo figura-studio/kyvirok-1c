@@ -1,0 +1,6 @@
+{
+  "demo": {
+    "Catalog_Номенклатура": { "create": ["Description"], "update": ["Description"] },
+    "Document_ЗаказКлиента": { "update": ["Комментарий"] }
+  }
+}
