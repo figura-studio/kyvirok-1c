@@ -11,7 +11,7 @@ import { z } from 'zod'
 import { makeReviews, policySchema } from './changes.mjs'
 
 export function buildServer(pool, policy) {
-  const server = new McpServer({ name: 'kyvirok-1c', version: '0.1.0' })
+  const server = new McpServer({ name: 'kyvirok-1c', version: '0.1.1' })
   registerSchemaTools(server, pool, resolveLimits())
   registerDataTools(server, pool, resolveLimits())
   const reviews = makeReviews(pool, policy)
@@ -63,7 +63,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     async getSecret(name) {
       const path = this.secretPath(name)
       if (!path || !existsSync(path)) return super.getSecret(name)
-      const script = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ' +
+      const script = '$ErrorActionPreference = "Stop"; $env:PSModulePath = Join-Path $PSHOME "Modules"; ' +
+        '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ' +
         '$s = ConvertTo-SecureString ([Console]::In.ReadToEnd().Trim()); ' +
         '[Console]::Write([Net.NetworkCredential]::new("", $s).Password)'
       return execFileSync('powershell.exe', ['-NoProfile','-NonInteractive','-Command',script], {
