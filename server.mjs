@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { ConnectionPool, FileConnectionSource, registerDataTools, registerSchemaTools,
@@ -8,13 +8,20 @@ import { ConnectionPool, FileConnectionSource, registerDataTools, registerSchema
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { makeReviews, policySchema } from './changes.mjs'
+import { makeReviews } from './changes.mjs'
+import { loadWritePolicy } from './policy.mjs'
 
-export function buildServer(pool, policy) {
-  const server = new McpServer({ name: 'kyvirok-1c', version: '0.1.1' })
+export function buildServer(pool, policy, policyState) {
+  const server = new McpServer({ name: 'kyvirok-1c', version: '0.1.2' })
   registerSchemaTools(server, pool, resolveLimits())
   registerDataTools(server, pool, resolveLimits())
-  const reviews = makeReviews(pool, policy)
+  const reviews = makeReviews(pool, policy, policyState?.assertCurrent)
+  server.registerTool('get_write_policy', {
+    title: 'Проверить разрешения записи в 1С',
+    description: 'Show policy path, loaded state, allowed entities/operations/fields, and whether a restart is required. Does not read credentials or contact 1C.',
+    annotations: { readOnlyHint: true }, inputSchema: {},
+  }, async () => toolResult(async () => ({ summary: 'Правила записи текущего MCP-сервера.',
+    data: policyState ? policyState.diagnostics() : { permissions: policy, source: 'provided-in-memory' } })))
   server.registerTool('preview_change', {
     title: 'Показать изменения в 1С',
     description: 'Prepare creation or editing of one catalog item or draft document. Discover fields with describe_entity. A table field replaces ALL its rows. Show the returned changes to the manager.',
@@ -32,25 +39,25 @@ export function buildServer(pool, policy) {
   }, async ({ reviewId }) => toolResult(() => reviews.apply(reviewId, async (message) => {
     const capability = server.server.getClientCapabilities()?.elicitation
     if (!capability || ('url' in capability && !('form' in capability))) {
-      throw new Error('Для записи клиент MCP должен поддерживать форму подтверждения.')
+      return { action: 'unsupported' }
     }
-    const result = await server.server.elicitInput({
+    try { return await server.server.elicitInput({
       mode: 'form', message, requestedSchema: {
         type: 'object', properties: {
           confirm: { type: 'boolean', title: 'Записать именно эти изменения в 1С', default: false },
         }, required: ['confirm'],
       },
-    })
-    return result.action === 'accept' && result.content?.confirm === true
+    }) } catch { return { action: 'error' } }
   })))
   return server
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const dataDir = process.env.ONEC_MCP_DATA_DIR ? resolveDataDir() : join(dirname(resolveDataDir()), 'kyvirok-1c')
-  const file = process.env.KYVIROK_1C_POLICY || (existsSync(join(dataDir, 'write-policy.json')) ? join(dataDir, 'write-policy.json') : '')
-  if (file && !isAbsolute(file)) throw new Error('KYVIROK_1C_POLICY должен содержать абсолютный путь.')
-  const policy = policySchema.parse(file ? JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) : {})
+  const policyState = loadWritePolicy(dataDir)
+  if (process.argv.includes('--diagnose')) {
+    console.log(JSON.stringify({ version: '0.1.2', ...policyState.diagnostics() }, null, 2))
+  } else {
   class LocalSource extends FileConnectionSource {
     secretPath(name) {
       return process.platform === 'win32' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)
@@ -73,5 +80,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     }
   }
   const pool = new ConnectionPool(new LocalSource({ dataDir }))
-  await buildServer(pool, policy).connect(new StdioServerTransport())
+  await buildServer(pool, policyState.policy, policyState).connect(new StdioServerTransport())
+  }
 }

@@ -107,3 +107,4 @@ try {
   }
 } finally { $lock.Dispose() }
 Write-Host "Saved the local connection in $dir. Restart the desktop app. Write access requires write-policy.json."
+Write-Host 'Check write permissions: node .\plugins\kyvirok-1c\server.mjs --diagnose'

@@ -1,6 +1,6 @@
 {
   "name": "kyvirok-1c-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Локальный MCP-коннектор к 1С с просмотром и подтверждением изменений",
   "license": "MIT",
@@ -11,7 +11,9 @@
   "scripts": {
     "build": "node build.mjs",
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "diagnose": "node plugins/kyvirok-1c/server.mjs --diagnose",
+    "package:windows": "powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File package-release.ps1"
   },
   "dependencies": {
     "commander": "15.0.0",

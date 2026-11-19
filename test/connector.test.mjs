@@ -66,14 +66,22 @@ test('stdio MCP → preview → manager → HTTP OData, including refusals and c
   const makeId = async () => { const p = await preview(); assert.ok(!p.isError, p.content[0].text); return p.structuredContent.reviewId }
   const list = await client.listTools()
   assert.ok(list.tools.some(t => t.name === 'query'))
+  assert.equal(list.tools.some(t => /^(post|delete|unpost)$/.test(t.name)), false)
+  const permissions = (await client.callTool({name:'get_write_policy',arguments:{}})).structuredContent
+  assert.equal(permissions.path, rules)
+  assert.equal(permissions.loaded, true)
+  assert.equal(permissions.writeEnabled, true)
+  assert.deepEqual(permissions.permissions.demo[set].create, ['Комментарий','Товары'])
   const first = await preview()
   assert.ok(!first.isError, first.content[0].text)
   assert.deepEqual(first.structuredContent.review.изменения[0], {поле:'Товары',было:[{Количество:20}],станет:[{Количество:12}]})
   assert.equal(writes.length,0)
-  assert.equal((await apply(first.structuredContent.reviewId)).structuredContent.state,'cancelled')
+  assert.equal((await apply(first.structuredContent.reviewId)).structuredContent.reason,'decline')
   assert.equal((await apply(first.structuredContent.reviewId)).isError,true)
   result = { action:'accept',content:{confirm:false} }
-  assert.equal((await apply(await makeId())).structuredContent.state,'cancelled')
+  assert.equal((await apply(await makeId())).structuredContent.reason,'unchecked')
+  result = { action:'cancel' }
+  assert.equal((await apply(await makeId())).structuredContent.reason,'cancel')
   result = { action:'accept',content:{confirm:true} }
   const stale = await makeId()
   record.DataVersion = 'v100'
@@ -82,8 +90,11 @@ test('stdio MCP → preview → manager → HTTP OData, including refusals and c
   const id = await makeId()
   const concurrent = await Promise.all([apply(id),apply(id)])
   assert.equal(concurrent.filter(r=>r.structuredContent?.state === 'saved').length,1)
+  assert.equal(concurrent.find(r=>r.structuredContent?.state === 'saved').structuredContent.verification.state,'verified')
+  assert.equal(concurrent.find(r=>r.structuredContent?.state === 'saved').structuredContent.verification.posted,false)
   assert.deepEqual(writes, [{ method:'PATCH',body:planArgs.fields,version:'v100' }])
   assert.match(shown,/20/); assert.match(shown,/12/)
+  assert.match(shown,/галочку/); assert.match(shown,/сводка/)
   const create = await preview({connection:'demo',entitySet:set,operation:'create',fields:{Комментарий:'образец'}})
   assert.equal((await apply(create.structuredContent.reviewId)).structuredContent.state,'saved')
   assert.equal(writes[1].method,'POST')
@@ -94,7 +105,11 @@ test('stdio MCP → preview → manager → HTTP OData, including refusals and c
   assert.equal(prompts,baselinePrompts)
   const reader = new Client({name:'reader',version:'1'})
   await reader.connect(launch(false))
-  try { assert.equal((await reader.callTool({name:'preview_change',arguments:planArgs})).isError,true) }
+  try {
+    assert.equal((await reader.callTool({name:'preview_change',arguments:planArgs})).isError,true)
+    assert.ok(!(await reader.callTool({name:'list_entities',arguments:{connection:'demo'}})).isError)
+    assert.equal((await reader.callTool({name:'get_write_policy',arguments:{}})).structuredContent.loaded,false)
+  }
   finally { await reader.close() }
   // Even when writes are configured, a client without a human form fails closed.
   record.Posted = false
@@ -102,7 +117,16 @@ test('stdio MCP → preview → manager → HTTP OData, including refusals and c
   await headless.connect(launch(true))
   try {
     const p = await headless.callTool({name:'preview_change',arguments:planArgs})
-    assert.equal((await headless.callTool({name:'apply_reviewed_change',arguments:{reviewId:p.structuredContent.reviewId}})).isError,true)
+    assert.equal((await headless.callTool({name:'apply_reviewed_change',arguments:{reviewId:p.structuredContent.reviewId}})).structuredContent.reason,'unsupported')
   } finally { await headless.close() }
+  assert.equal(writes.length,2)
+  const old = await makeId()
+  await writeFile(rules, '{}')
+  const changed = (await client.callTool({name:'get_write_policy',arguments:{}})).structuredContent
+  assert.equal(changed.restartRequired,true)
+  assert.equal(changed.writeEnabled,false)
+  const oldResult = await apply(old)
+  assert.equal(oldResult.isError,true)
+  assert.match(oldResult.content[0].text,/Перезапустите/)
   assert.equal(writes.length,2)
 })

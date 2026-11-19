@@ -11,6 +11,46 @@ export const policySchema = z.record(z.string(), z.record(z.string(),
 const ttl = 5 * 60_000
 const maxReviewBytes = 16_000
 
+const confirmationFailures = {
+  decline: 'Клиент вернул отказ. Проверьте, разрешён ли показ форм MCP в активном режиме чата.',
+  cancel: 'Клиент сообщил о закрытии формы.',
+  unchecked: 'Форма принята, но галочка «Записать именно эти изменения в 1С» не установлена.',
+  unsupported: 'Клиент MCP не поддерживает форму подтверждения. Используйте клиент с поддержкой elicitation form.',
+  error: 'Клиент не вернул подтверждение формы. Проверьте настройки показа форм MCP.',
+}
+
+function shortReview(entitySet, key, current, payload) {
+  const values = { ...current, ...payload }
+  const summary = {
+    действие: key ? 'Изменение' : 'Создание',
+    наименованиеИлиНомер: values.Description ?? values.Number ?? 'Назначит 1С',
+  }
+  if (!entitySet.startsWith('Document_')) return summary
+  summary.покупатель = values.Контрагент?.Description ?? values.Партнер?.Description ??
+    (values.Контрагент_Key ? 'Ключ контрагента: ' + values.Контрагент_Key :
+      values.Партнер_Key ? 'Ключ партнёра: ' + values.Партнер_Key : 'Не указан в предпросмотре')
+  summary.дата = values.Date ?? 'Не указана; значение определит 1С'
+  summary.проведение = values.Posted === true ? 'Проведён' : values.Posted === false ? 'Не проведён' :
+    'Создание черновика; статус проверить после записи'
+  summary.суммаДокумента = values.СуммаДокумента ?? 'Не передана; проверить после записи'
+  summary.НДС = values.СуммаНДС ?? 'См. ставки и суммы в строках; проверить после записи'
+  summary.суммаВключаетНДС = values.СуммаВключаетНДС ?? 'Не указано'
+  summary.табличныеЧасти = Object.fromEntries(Object.entries(values).filter(([, v]) => Array.isArray(v))
+    .map(([field, rows]) => [field, { всегоСтрок: rows.length, первыеСтроки: rows.slice(0, 10).map(row => Object.fromEntries(
+      ['Номенклатура_Key', 'Содержание', 'Количество', 'ЕдиницаИзмерения_Key', 'Цена', 'Сумма', 'СтавкаНДС', 'СуммаНДС']
+        .filter(column => row && Object.hasOwn(row, column)).map(column => [column, row[column]]))) }]))
+  return summary
+}
+
+// 1C may add server-managed columns to rows; every submitted value must still match.
+function matchesSubmitted(actual, expected) {
+  if (expected === null || typeof expected !== 'object') return Object.is(actual, expected)
+  if (Array.isArray(expected)) return Array.isArray(actual) && actual.length === expected.length &&
+    expected.every((value, i) => matchesSubmitted(actual[i], value))
+  return actual !== null && typeof actual === 'object' && Object.entries(expected)
+    .every(([key, value]) => Object.hasOwn(actual, key) && matchesSubmitted(actual[key], value))
+}
+
 function checkedFields(index, entitySet, values, allowed) {
   if (!Object.hasOwn(index.entitySetToType, entitySet)) throw new Error('Объект отсутствует в опубликованных метаданных.')
   const schema = index.schemas[index.entitySetToType[entitySet]]
@@ -44,14 +84,16 @@ function reviewText(data) {
   const escaped = json.replace(/[`<>\u202a-\u202e\u2066-\u2069\u2028\u2029]/g,
     ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'))
   if (Buffer.byteLength(escaped) > maxReviewBytes) throw new Error('Изменение слишком велико для полного просмотра.')
-  return 'Проверьте базу, объект и каждое поле. Указанные таблицы заменяются целиком.\n\n' +
+  return 'Проверьте сводку и полный набор полей. Для записи установите галочку ' +
+    '«Записать именно эти изменения в 1С» и примите форму. Указанные таблицы заменяются целиком.\n\n' +
     '```json\n' + escaped + '\n```'
 }
 
-export function makeReviews(pool, policy) {
+export function makeReviews(pool, policy, assertPolicyCurrent = () => {}) {
   const pending = new Map()
   return {
     async preview({ connection, entitySet, operation, key, fields: proposed }) {
+      assertPolicyCurrent()
       if (!/^(Catalog|Document)_[\p{L}\p{N}_]+$/u.test(entitySet) || !Object.hasOwn(policy, connection) ||
           !Object.hasOwn(policy[connection], entitySet)) throw new Error('Этот объект не разрешён для записи.')
       const allowed = policy[connection][entitySet][operation]
@@ -73,34 +115,63 @@ export function makeReviews(pool, policy) {
       const review = { база: connection, объект: entitySet, операция: key ? 'Изменить' : 'Создать',
         ...(key ? { ключ: key, наименованиеИлиНомер: current.Description ?? current.Number ?? key } : {}),
         изменения: changes }
-      const message = reviewText(review)
       const now = Date.now()
       for (const [id, draft] of pending) if (draft.expires <= now) pending.delete(id)
       if (pending.size >= 100) throw new Error('Достигнут лимит активных предпросмотров.')
       const reviewId = randomUUID()
-      pending.set(reviewId, { client, entitySet, key, payload, version, message, expires: now + ttl })
-      return { summary: 'Предпросмотр на пять минут. Данные в 1С ещё не записаны.', data: { reviewId, review } }
+      const overview = shortReview(entitySet, key, current, payload)
+      const fullMessage = reviewText({ сводка: overview, ...review })
+      pending.set(reviewId, { client, entitySet, key, payload, version, message: fullMessage, expires: now + ttl })
+      return { summary: 'Предпросмотр на пять минут. Для записи отметьте галочку в форме подтверждения.',
+        data: { reviewId, overview, review } }
     },
     async apply(id, confirm) {
       const draft = pending.get(id)
       pending.delete(id) // Consume before the first await, including on cancellation or transport failure.
       if (!draft || draft.expires <= Date.now()) throw new Error('Предпросмотр истёк или уже использован.')
-      if (await confirm(draft.message) !== true) return { summary: 'Отменено. Записи в 1С не было.', data: { state: 'cancelled' } }
+      assertPolicyCurrent()
+      const answer = await confirm(draft.message)
+      if (!(answer?.action === 'accept' && answer.content?.confirm === true)) {
+        const reason = answer?.action === 'accept' ? 'unchecked' :
+          (Object.hasOwn(confirmationFailures, answer?.action) ? answer.action : 'error')
+        return { summary: confirmationFailures[reason] + ' Запись не выполнялась.',
+          data: { state: 'cancelled', reason } }
+      }
       if (draft.expires <= Date.now()) throw new Error('Время подтверждения истекло. Подготовьте новый просмотр.')
+      assertPolicyCurrent()
       const { client, entitySet, key, payload, version } = draft
       let saved
       try {
         // The client also rereads DataVersion immediately before PATCH. If-Match
         // lets deployments supporting conditional updates guard the write on the server.
         saved = key
-          ? await client.entity(entitySet, key).withHeader('If-Match', version).patch(payload, { expectVersion: version })
-          : await client.entity(entitySet).create(payload)
+          ? await client.entity(entitySet, key).withHeader('If-Match', version).patch(payload, { expectVersion: version, retry: false })
+          : await client.entity(entitySet).create(payload, { retry: false })
       } catch (err) {
         if (err?.status >= 400 && err.status < 500) throw err
         throw new Error('Результат записи не подтверждён. Проверьте объект в 1С перед повторной попыткой.', { cause: err })
       }
-      return { summary: '1С подтвердила запись.', data: { state: 'saved', entitySet, key: saved?.Ref_Key ?? key,
-        ...(saved?.Number ? { number: saved.Number } : {}) } }
+      const savedKey = saved?.Ref_Key ?? key
+      const base = { state: 'saved', entitySet, key: savedKey, ...(saved?.Number ? { number: saved.Number } : {}) }
+      let confirmed
+      try {
+        if (!savedKey) throw new Error('1С не вернула ключ')
+        confirmed = await client.entity(entitySet, savedKey).get()
+        if (!confirmed || typeof confirmed !== 'object' || Array.isArray(confirmed)) throw new Error('Неверный ответ контрольного чтения')
+      } catch {
+        return { summary: '1С подтвердила запись, но повторное чтение не удалось. Проверьте объект по ключу.',
+          data: { ...base, verification: { state: 'unavailable' } } }
+      }
+      const differentFields = Object.keys(payload).filter(field =>
+        !matchesSubmitted(confirmed[field], payload[field]))
+      if (confirmed.Ref_Key !== savedKey) differentFields.push('Ref_Key')
+      if (entitySet.startsWith('Document_') && confirmed.Posted !== false) differentFields.push('Posted')
+      return { summary: differentFields.length ? 'Запись прочитана обратно. Проверьте отличия значений, возвращённых 1С.' :
+        '1С подтвердила запись. Объект прочитан обратно.',
+        data: { ...base, verification: { state: differentFields.length ? 'differences' : 'verified',
+          differentFields, overview: shortReview(entitySet, key, confirmed, {}),
+          fields: Object.fromEntries(Object.keys(payload).map(field => [field, confirmed[field]])),
+          ...(entitySet.startsWith('Document_') ? { posted: confirmed.Posted } : {}) } } }
     },
   }
 }
