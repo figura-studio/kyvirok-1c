@@ -2,9 +2,20 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { policySchema } from './changes.mjs'
+import { bridgePolicySchema } from './bridge.mjs'
 
 export function loadWritePolicy(dataDir, override = process.env.KYVIROK_1C_POLICY) {
-  const path = override || join(dataDir, 'write-policy.json')
+  return loadPolicy(dataDir, override, 'write-policy.json', policySchema, policy => Object.values(policy).some(entities =>
+    Object.values(entities).some(operations => Object.values(operations).some(fields => fields.length > 0))))
+}
+
+export function loadBridgePolicy(dataDir, override = process.env.KYVIROK_1C_BRIDGE_POLICY) {
+  return loadPolicy(dataDir, override, 'bridge-policy.json', bridgePolicySchema,
+    policy => Object.values(policy).some(rule => rule.operations.length > 0))
+}
+
+function loadPolicy(dataDir, override, filename, schema, enabled) {
+  const path = override || join(dataDir, filename)
   if (!isAbsolute(path)) throw new Error('Путь к правилам записи должен быть абсолютным.')
   function read() {
     try { return readFileSync(path, 'utf8').replace(/^\uFEFF/, '') }
@@ -15,9 +26,9 @@ export function loadWritePolicy(dataDir, override = process.env.KYVIROK_1C_POLIC
   try {
     source = read()
     if (source === null && override) throw new Error('missing explicit policy')
-    policy = policySchema.parse(source === null ? {} : JSON.parse(source))
+    policy = schema.parse(source === null ? {} : JSON.parse(source))
   } catch {
-    throw new Error('Не удалось загрузить правила записи: ' + path + '. Проверьте путь, доступ и формат JSON по write-policy.example.json.')
+    throw new Error('Не удалось загрузить правила записи: ' + path + '. Проверьте путь, доступ и формат JSON по ' + filename.replace('.json', '.example.json') + '.')
   }
   const fingerprint = digest(source)
   function diagnostics() {
@@ -30,8 +41,7 @@ export function loadWritePolicy(dataDir, override = process.env.KYVIROK_1C_POLIC
     return {
       path, loaded: source !== null, currentStatus, changedSinceStart,
       restartRequired: changedSinceStart,
-      writeEnabled: !changedSinceStart && Object.values(policy).some(entities =>
-        Object.values(entities).some(operations => Object.values(operations).some(fields => fields.length > 0))),
+      writeEnabled: !changedSinceStart && enabled(policy),
       permissions: policy,
       note: 'Правила загружаются при старте. После их изменения перезапустите MCP-сервер и создайте новый предпросмотр.',
     }

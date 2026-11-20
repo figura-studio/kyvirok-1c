@@ -4,6 +4,8 @@ node_modules/
 config.json
 credentials.json
 write-policy.json
+bridge-policy.json
+artifacts/
 *.dpapi
 *.tmp
 *.log

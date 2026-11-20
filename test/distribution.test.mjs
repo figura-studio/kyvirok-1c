@@ -30,6 +30,7 @@ test('complete ZIP contains sources and policy example; its bundled MCP runs wit
     const paths = JSON.parse(result.stdout)
     const prefix = `kyvirok-1c-${manifest.version}/`
     for (const path of ['write-policy.example.json','build.mjs','server.mjs','changes.mjs','policy.mjs',
+      'approval.mjs','actions.mjs','bridge.mjs','artifacts.mjs','bridge-policy.example.json','BRIDGE.md','OPERATIONS.md',
       'test/connector.test.mjs','test/distribution.test.mjs','vendor/mcp/src/internal.ts',
       'plugins/kyvirok-1c/plugin.json','plugins/kyvirok-1c/server.mjs','.agents/plugins/marketplace.json']) {
       assert.ok(paths.includes(prefix+path), 'Missing '+path)
@@ -46,6 +47,9 @@ test('complete ZIP contains sources and policy example; its bundled MCP runs wit
     try {
       assert.equal(client.getServerVersion().version,manifest.version)
       assert.ok((await client.listTools()).tools.some(tool=>tool.name==='apply_reviewed_change'))
+      for (const name of ['get_capabilities','preview_document_action','preview_business_operation','apply_reviewed_operation','get_operation_status']) {
+        assert.ok((await client.listTools()).tools.some(tool=>tool.name===name))
+      }
       assert.equal((await client.callTool({name:'get_write_policy',arguments:{}})).structuredContent.writeEnabled,false)
     } finally { await client.close() }
   })

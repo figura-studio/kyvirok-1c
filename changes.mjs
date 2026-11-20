@@ -5,8 +5,10 @@ const name = /^[\p{L}_][\p{L}\p{N}_]*$/u
 const reserved = new Set(['Ref_Key', 'DataVersion', 'Posted', 'DeletionMark', 'Predefined', 'PredefinedDataName',
   '__proto__', 'constructor', 'prototype'])
 const fields = z.array(z.string().regex(name))
+export const nativeActionNames = ['post', 'unpost', 'mark_deletion', 'unmark_deletion']
 export const policySchema = z.record(z.string(), z.record(z.string(),
-  z.strictObject({ create: fields.optional(), update: fields.optional() })))
+  z.strictObject({ create: fields.optional(), update: fields.optional(),
+    actions: z.array(z.enum(nativeActionNames)).optional() })))
 
 const ttl = 5 * 60_000
 const maxReviewBytes = 16_000
@@ -19,7 +21,7 @@ const confirmationFailures = {
   error: 'Клиент не вернул подтверждение формы. Проверьте настройки показа форм MCP.',
 }
 
-function shortReview(entitySet, key, current, payload) {
+export function shortReview(entitySet, key, current, payload) {
   const values = { ...current, ...payload }
   const summary = {
     действие: key ? 'Изменение' : 'Создание',
