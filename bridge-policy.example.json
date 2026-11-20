@@ -1,0 +1,8 @@
+{
+  "demo": {
+    "servicePath": "/demo/hs/kyvirok/v1",
+    "operations": ["print.document", "report.build", "document.create_based_on", "edo.prepare", "edo.sign", "edo.send", "edo.status"],
+    "defaultEdoProvider": "diadok",
+    "edoProviders": ["1c-edo", "diadok", "sbis"]
+  }
+}
