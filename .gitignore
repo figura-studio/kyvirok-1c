@@ -5,6 +5,7 @@ config.json
 credentials.json
 write-policy.json
 bridge-policy.json
+edo-policy.json
 artifacts/
 *.dpapi
 *.tmp

@@ -3,6 +3,11 @@ import { isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { policySchema } from './changes.mjs'
 import { bridgePolicySchema } from './bridge.mjs'
+import { edoPolicySchema } from './edo.mjs'
+
+export function loadEdoPolicy(dataDir, override = process.env.KYVIROK_EDO_POLICY) {
+  return loadPolicy(dataDir, override, 'edo-policy.json', edoPolicySchema, () => false)
+}
 
 export function loadWritePolicy(dataDir, override = process.env.KYVIROK_1C_POLICY) {
   return loadPolicy(dataDir, override, 'write-policy.json', policySchema, policy => Object.values(policy).some(entities =>

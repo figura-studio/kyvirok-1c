@@ -9,7 +9,8 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { makeReviews } from './changes.mjs'
-import { loadWritePolicy, loadBridgePolicy } from './policy.mjs'
+import { loadWritePolicy, loadBridgePolicy, loadEdoPolicy } from './policy.mjs'
+import { makeExternalEdo, makeEdoSecrets, edoDocumentInput, edoListInput } from './edo.mjs'
 import { makeApprovalQueue } from './approval.mjs'
 import { makeActions } from './actions.mjs'
 import { makeBridge, edoProviders } from './bridge.mjs'
@@ -17,7 +18,7 @@ import { makeArtifacts } from './artifacts.mjs'
 import { nativeActionNames } from './changes.mjs'
 
 export function buildServer(pool, policy, policyState, options = {}) {
-  const server = new McpServer({ name: 'kyvirok-1c', version: '0.2.0-preview.1' })
+  const server = new McpServer({ name: 'kyvirok-1c', version: '0.2.0-preview.2' })
   registerSchemaTools(server, pool, resolveLimits())
   registerDataTools(server, pool, resolveLimits())
   const reviews = makeReviews(pool, policy, policyState?.assertCurrent)
@@ -26,15 +27,18 @@ export function buildServer(pool, policy, policyState, options = {}) {
   const bridgeState = options.bridgeState ?? { policy: {}, assertCurrent() {} }
   const artifacts = makeArtifacts(options.artifactDir ?? join(process.cwd(), 'artifacts'))
   const bridge = makeBridge(pool, bridgeState, queue, artifacts, options.bridgeTransport)
+  const edoState = options.edoState ?? { policy: {}, assertCurrent() {} }
+  const edo = makeExternalEdo(edoState, queue, artifacts,
+    options.edoSecret ?? (async () => { throw new Error('Источник токена ЭДО не настроен.') }), options.edoTransport)
   const operationResult = async run => {
     const result = await toolResult(run)
     if (!result.isError) for (const file of result.structuredContent?.files ?? []) {
       if (file.uri) result.content.push({ type: 'resource_link', uri: file.uri, name: file.name,
-        mimeType: file.mimeType, size: file.size, description: 'Файл из 1С; SHA-256 проверен.' })
+        mimeType: file.mimeType, size: file.size, description: 'Файл из 1С или ЭДО; сохранён с SHA-256.' })
     }
     return result
   }
-  const ask = async (message, title = 'Выполнить только эту операцию в 1С') => {
+  const ask = async (message, title = 'Выполнить только показанную операцию в 1С или ЭДО') => {
     const capability = server.server.getClientCapabilities()?.elicitation
     if (!capability || ('url' in capability && !('form' in capability))) return { action: 'unsupported' }
     try { return await server.server.elicitInput({ mode: 'form', message, requestedSchema: {
@@ -51,8 +55,33 @@ export function buildServer(pool, policy, policyState, options = {}) {
     try { extension = await bridge.capabilities(connection) }
     catch { extension = { configured: Object.hasOwn(bridgeState.policy, connection), available: false,
       note: 'Не удалось проверить расширение. Проверьте его адрес, права, версию протокола и перезапуск после изменения настроек.' } }
-    return { summary: 'Разрешения и опубликованные возможности. Фактические права проверяет 1С.', data: { native, extension } }
+    return { summary: 'Разрешения и опубликованные возможности. Фактические права проверяют 1С и оператор.',
+      data: { native, extension, externalEdo: edo.connections().data } }
   }))
+  server.registerTool('get_edo_connections', {
+    title: 'Посмотреть отдельные подключения ЭДО', annotations: { readOnlyHint: true }, inputSchema: {},
+    description: 'Show separate operator accounts, not 1C bridge profiles. Configured does not mean API access is verified. No credentials returned.',
+  }, async () => toolResult(async () => edo.connections()))
+  server.registerTool('diagnose_edo_connection', {
+    title: 'Проверить чтение API Диадока', annotations: { readOnlyHint: true },
+    inputSchema: { account: edoDocumentInput.account },
+    description: 'Read the configured box and probe document access. No registration, signing, sending or settings changes.',
+  }, async ({ account }) => toolResult(() => edo.diagnose(account)))
+  server.registerTool('list_edo_documents', {
+    title: 'Найти документы в отдельном ЭДО', annotations: { readOnlyHint: true }, inputSchema: edoListInput,
+    description: 'Read one Diadoc page. Keep identical filters and use nextAfterIndexKey while mayHaveMore. Dates are document dates. Defaults to head department; drafts are excluded. An empty result never proves no documents were sent.',
+  }, async args => toolResult(() => edo.list(args)))
+  server.registerTool('get_edo_document', {
+    title: 'Прочитать документ и статус ЭДО', annotations: { readOnlyHint: true }, inputSchema: edoDocumentInput,
+  }, async args => toolResult(() => edo.document(args)))
+  server.registerTool('preview_edo_print', {
+    title: 'Предпросмотр получения PDF из Диадока', annotations: { readOnlyHint: true }, inputSchema: edoDocumentInput,
+    description: 'Preview printing an EXISTING Diadoc document, not creating a UPD in 1C. Use apply_reviewed_operation for human approval. No signing/sending.',
+  }, async args => toolResult(() => edo.previewPrint(args)))
+  server.registerTool('get_edo_print_status', {
+    title: 'Получить ожидающий PDF Диадока', annotations: { readOnlyHint: true }, inputSchema: { requestId: z.uuid() },
+    description: 'Continue only a previously approved pending PDF after retryAfterSeconds. Same process, 15-minute lifetime. Cannot print arbitrary document IDs.',
+  }, async ({ requestId }) => operationResult(() => edo.printStatus(requestId)))
   server.registerTool('preview_document_action', {
     title: 'Предпросмотр проведения или пометки удаления', annotations: { readOnlyHint: true },
     description: 'Preview ONE post/unpost or deletion flag action. Includes full document and effects. No automatic repost or chained actions. Post/Unpost use a preflight version check, not an atomic OData version guarantee.',
@@ -65,7 +94,7 @@ export function buildServer(pool, policy, policyState, options = {}) {
       parameters: z.record(z.string(), z.json()) },
   }, async args => toolResult(() => bridge.preview(args)))
   server.registerTool('apply_reviewed_operation', {
-    title: 'Подтвердить и выполнить одну операцию 1С',
+    title: 'Подтвердить и выполнить одну операцию 1С или ЭДО',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     description: 'Ask the HUMAN with a required unchecked confirmation. Execute only the immutable one-use review. This is not permission for subsequent posting, signing or sending. Never retry unknown operations.',
     inputSchema: { reviewId: z.uuid() },
@@ -75,7 +104,7 @@ export function buildServer(pool, policy, policyState, options = {}) {
     inputSchema: { planId: z.uuid() },
   }, async args => operationResult(() => bridge.status(args)))
   server.registerResource('operation-artifact', new ResourceTemplate('kyvirok-1c://artifacts/{id}', { list: undefined }),
-    { title: 'Печатная форма или отчёт из 1С' }, async (uri, { id }) => artifacts.read(id))
+    { title: 'Печатная форма или отчёт из 1С / ЭДО' }, async (uri, { id }) => artifacts.read(id))
   server.registerTool('get_write_policy', {
     title: 'Проверить разрешения записи в 1С',
     description: 'Show policy path, loaded state, allowed entities/operations/fields, and whether a restart is required. Does not read credentials or contact 1C.',
@@ -105,8 +134,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const dataDir = process.env.ONEC_MCP_DATA_DIR ? resolveDataDir() : join(dirname(resolveDataDir()), 'kyvirok-1c')
   const policyState = loadWritePolicy(dataDir)
   const bridgeState = loadBridgePolicy(dataDir)
+  const edoState = loadEdoPolicy(dataDir)
   if (process.argv.includes('--diagnose')) {
-    console.log(JSON.stringify({ version: '0.2.0-preview.1', ...policyState.diagnostics(), bridge: bridgeState.diagnostics() }, null, 2))
+    console.log(JSON.stringify({ version: '0.2.0-preview.2', ...policyState.diagnostics(), bridge: bridgeState.diagnostics(),
+      externalEdo: edoState.diagnostics() }, null, 2))
   } else {
   class LocalSource extends FileConnectionSource {
     secretPath(name) {
@@ -130,7 +161,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     }
   }
   const pool = new ConnectionPool(new LocalSource({ dataDir }))
-  await buildServer(pool, policyState.policy, policyState, { bridgeState,
+  await buildServer(pool, policyState.policy, policyState, { bridgeState, edoState, edoSecret: makeEdoSecrets(dataDir),
     artifactDir: process.env.KYVIROK_1C_ARTIFACTS_DIR || join(dataDir, 'artifacts') }).connect(new StdioServerTransport())
   }
 }
