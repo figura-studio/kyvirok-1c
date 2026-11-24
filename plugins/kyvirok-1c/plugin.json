@@ -1,10 +1,15 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "kyvirok-1c",
-  "version": "0.2.0-preview.1",
+  "version": "0.2.0-preview.2",
   "description": "Read 1C:Enterprise data and prepare manager-approved edits over OData.",
-  "extensions": { "com.openai": {
-    "requires_local_executor": true,
-    "interface": { "displayName": "kyvirok for 1C", "shortDescription": "1С: просмотр данных и запись после подтверждения" }
-  } }
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "interface": {
+        "displayName": "kyvirok for 1C",
+        "shortDescription": "1С: просмотр данных и запись после подтверждения"
+      }
+    }
+  }
 }
