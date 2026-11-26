@@ -10,7 +10,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { makeReviews } from './changes.mjs'
 import { loadWritePolicy, loadBridgePolicy, loadEdoPolicy } from './policy.mjs'
-import { makeExternalEdo, makeEdoSecrets, edoDocumentInput, edoListInput } from './edo.mjs'
+import { makeExternalEdo, makeEdoSecrets, createDiadocTransport, edoDocumentInput, edoListInput } from './edo.mjs'
+import { makeEdoDrafts, edoDraftInput } from './edo-drafts.mjs'
 import { makeApprovalQueue } from './approval.mjs'
 import { makeActions } from './actions.mjs'
 import { makeBridge, edoProviders } from './bridge.mjs'
@@ -18,7 +19,7 @@ import { makeArtifacts } from './artifacts.mjs'
 import { nativeActionNames } from './changes.mjs'
 
 export function buildServer(pool, policy, policyState, options = {}) {
-  const server = new McpServer({ name: 'kyvirok-1c', version: '0.2.0-preview.2' })
+  const server = new McpServer({ name: 'kyvirok-1c', version: '0.2.0-preview.3' })
   registerSchemaTools(server, pool, resolveLimits())
   registerDataTools(server, pool, resolveLimits())
   const reviews = makeReviews(pool, policy, policyState?.assertCurrent)
@@ -30,6 +31,8 @@ export function buildServer(pool, policy, policyState, options = {}) {
   const edoState = options.edoState ?? { policy: {}, assertCurrent() {} }
   const edo = makeExternalEdo(edoState, queue, artifacts,
     options.edoSecret ?? (async () => { throw new Error('Источник токена ЭДО не настроен.') }), options.edoTransport)
+  const drafts = makeEdoDrafts(edoState, queue, join(options.artifactDir ?? join(process.cwd(), 'artifacts'), '.edo-drafts'),
+    options.edoSecret ?? (async () => { throw new Error('Источник токена ЭДО не настроен.') }), options.edoTransport ?? createDiadocTransport)
   const operationResult = async run => {
     const result = await toolResult(run)
     if (!result.isError) for (const file of result.structuredContent?.files ?? []) {
@@ -62,6 +65,27 @@ export function buildServer(pool, policy, policyState, options = {}) {
     title: 'Посмотреть отдельные подключения ЭДО', annotations: { readOnlyHint: true }, inputSchema: {},
     description: 'Show separate operator accounts, not 1C bridge profiles. Configured does not mean API access is verified. No credentials returned.',
   }, async () => toolResult(async () => edo.connections()))
+  server.registerTool('get_edo_workflow', {
+    title: 'Как пройти от 1С до Диадока', annotations: { readOnlyHint: true }, inputSchema: {},
+    description: 'Choose API or browser/email-code workflow and see what must be verified. This tool does not log in, read email, generate a UPD XML, sign or send.',
+  }, async () => toolResult(async () => ({ summary: 'Два пути: API при настроенном доступе или кабинет Диадока через браузер и код из почты.',
+    data: {
+      accounts: edo.connections().data.accounts,
+      oneC: 'Подготовить реализацию/счёт-фактуру через разрешённые поля OData, после отдельного подтверждения. Штатный XML УПД выгрузить средствами 1С; этот сервер XML из OData не генерирует.',
+      api: ['Проверить diagnose_edo_connection. Браузерная сессия и код из почты не являются API-токеном.',
+        'preview_edo_draft → показать весь XML, стороны и SHA-256 → apply_reviewed_operation с формой человека.',
+        'Сохранить operationId/messageId. При unknown проверить кабинет; не повторять и не удалять журнал.'],
+      browser: { url: 'https://diadoc.kontur.ru/', executor: 'Внешние инструменты управления браузером и почтой агента; в MCP-сервере их нет.',
+        steps: ['Войти через почту и одноразовый код, если такой вариант предлагает кабинет. При действующей сессии повторный вход не нужен.',
+          'Если пользователь разрешил вход и доступ к своему ящику, прочитать только актуальное письмо для начатого входа и ввести код на проверенной странице. Код не выводить и не сохранять.',
+          'Если почта недоступна, попросить пользователя ввести код. Не извлекать cookies и не превращать веб-сессию в API-авторизацию.',
+          'Проверить нужную организацию. Найти созданный черновик или, после отдельного согласия на загрузку, загрузить XML вручную через кабинет.',
+          'Открыть печатную форму и проверить стороны, номер, суммы, НДС, строки. Подпись и отправка — отдельные действия человека в кабинете.'] },
+      verification: ['Версия и подключение 1С; чтение OData', 'Реальный способ выгрузки XML/печатного УПД',
+        'API: результат чтения/HTTP-код либо выбран браузерный путь', 'Вход по почте: доступ к нужному ящику, успешный вход без раскрытия кода',
+        'Черновик: номер, SHA-256 и результат проверки', 'Подписант, место ключа, рабочее место и необходимость МЧД'],
+      signingAvailable: false, sendingAvailable: false, nativeXmlGenerationAvailable: false,
+    } })))
   server.registerTool('diagnose_edo_connection', {
     title: 'Проверить чтение API Диадока', annotations: { readOnlyHint: true },
     inputSchema: { account: edoDocumentInput.account },
@@ -82,6 +106,15 @@ export function buildServer(pool, policy, policyState, options = {}) {
     title: 'Получить ожидающий PDF Диадока', annotations: { readOnlyHint: true }, inputSchema: { requestId: z.uuid() },
     description: 'Continue only a previously approved pending PDF after retryAfterSeconds. Same process, 15-minute lifetime. Cannot print arbitrary document IDs.',
   }, async ({ requestId }) => operationResult(() => edo.printStatus(requestId)))
+  server.registerTool('preview_edo_draft', {
+    title: 'Показать импорт XML УПД в черновик Диадока', annotations: { readOnlyHint: true }, inputSchema: edoDraftInput,
+    description: 'Read an existing seller XML from the policy importDirectory, verify party boxes, show complete XML and hash. No XML upload until apply_reviewed_operation confirms. Does not generate XML from OData. Creates only unsigned drafts; human signs/sends in the operator cabinet.',
+  }, async args => toolResult(() => drafts.preview(args)))
+  server.registerTool('get_edo_draft_receipt', {
+    title: 'Проверить локальную квитанцию импорта в Диадок', annotations: { readOnlyHint: true },
+    inputSchema: { account: edoDraftInput.account, operationId: z.uuid() },
+    description: 'Read the durable local receipt only, not live remote state. Unknown outcomes require checking the cabinet. Never retry or remove journal records to bypass duplicate protection.',
+  }, async args => toolResult(() => drafts.receipt(args)))
   server.registerTool('preview_document_action', {
     title: 'Предпросмотр проведения или пометки удаления', annotations: { readOnlyHint: true },
     description: 'Preview ONE post/unpost or deletion flag action. Includes full document and effects. No automatic repost or chained actions. Post/Unpost use a preflight version check, not an atomic OData version guarantee.',
@@ -136,7 +169,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const bridgeState = loadBridgePolicy(dataDir)
   const edoState = loadEdoPolicy(dataDir)
   if (process.argv.includes('--diagnose')) {
-    console.log(JSON.stringify({ version: '0.2.0-preview.2', ...policyState.diagnostics(), bridge: bridgeState.diagnostics(),
+    console.log(JSON.stringify({ version: '0.2.0-preview.3', ...policyState.diagnostics(), bridge: bridgeState.diagnostics(),
       externalEdo: edoState.diagnostics() }, null, 2))
   } else {
   class LocalSource extends FileConnectionSource {

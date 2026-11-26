@@ -1,6 +1,6 @@
 {
   "name": "kyvirok-1c-mcp",
-  "version": "0.2.0-preview.2",
+  "version": "0.2.0-preview.3",
   "private": true,
   "description": "Локальный MCP-коннектор к 1С с просмотром и подтверждением изменений",
   "license": "MIT",

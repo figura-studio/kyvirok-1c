@@ -6,7 +6,8 @@ import { bridgePolicySchema } from './bridge.mjs'
 import { edoPolicySchema } from './edo.mjs'
 
 export function loadEdoPolicy(dataDir, override = process.env.KYVIROK_EDO_POLICY) {
-  return loadPolicy(dataDir, override, 'edo-policy.json', edoPolicySchema, () => false)
+  return loadPolicy(dataDir, override, 'edo-policy.json', edoPolicySchema,
+    policy => Object.values(policy).some(rule => rule.operations.includes('draft.create')))
 }
 
 export function loadWritePolicy(dataDir, override = process.env.KYVIROK_1C_POLICY) {

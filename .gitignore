@@ -7,6 +7,7 @@ write-policy.json
 bridge-policy.json
 edo-policy.json
 artifacts/
+.edo-drafts/
 *.dpapi
 *.tmp
 *.log

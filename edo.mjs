@@ -1,16 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, isAbsolute } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { z } from 'zod'
 import { hashRequest } from './bridge.mjs'
+import { validateDraftBody } from './edo-drafts.mjs'
 
 const alias = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/)
 const identifier = z.uuid().transform(value => value.toLowerCase())
 export const edoPolicySchema = z.record(alias, z.strictObject({
   provider: z.literal('diadok'), boxId: identifier,
-  operations: z.array(z.enum(['documents.read', 'document.print'])).default([]),
-}))
+  operations: z.array(z.enum(['documents.read', 'document.print', 'draft.create'])).default([]),
+  importDirectory: z.string().refine(isAbsolute, 'Нужен абсолютный каталог XML').optional(),
+}).refine(rule => !rule.operations.includes('draft.create') || !!rule.importDirectory,
+  'Для draft.create нужен отдельный importDirectory'))
 export const edoDocumentInput = { account: alias, messageId: identifier, entityId: identifier }
 export const edoListInput = {
   account: alias,
@@ -68,13 +71,20 @@ async function limitedBody(response, limit) {
   } finally { await reader.cancel().catch(() => {}) }
 }
 
-// Fixed HTTPS origin and closed route/method set: no arbitrary URL or write API.
+// Fixed HTTPS origin and closed routes. The only write route accepts unsigned drafts only.
 // fetchImpl is a test seam, never a setting or MCP argument.
 export function createDiadocTransport(getToken, fetchImpl = fetch) {
   return async (path, query, body) => {
-    const methods = { '/GetBox': 'GET', '/V4/GetDocuments': 'POST', '/V3/GetDocument': 'GET', '/GeneratePrintForm': 'GET' }
+    const methods = { '/GetBox': 'GET', '/V4/GetDocuments': 'POST', '/V3/GetDocument': 'GET', '/GeneratePrintForm': 'GET',
+      '/DetectDocumentTitles': 'POST', '/V3/PostMessage': 'POST' }
     if (!Object.hasOwn(methods, path) || (methods[path] === 'POST') !== (body !== undefined)) {
       throw new Error('Недопустимая операция прямого адаптера Диадока.')
+    }
+    const binary = path === '/DetectDocumentTitles'
+    if (binary && (!Buffer.isBuffer(body) || body.length === 0 || body.length > 128 * 1024)) throw new Error('Недопустимый XML для распознавания.')
+    if (path === '/V3/PostMessage') {
+      validateDraftBody(body)
+      z.strictObject({ operationId: z.uuid() }).parse(query)
     }
     const url = new URL(path, 'https://diadoc-api.kontur.ru')
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value))
@@ -84,8 +94,8 @@ export function createDiadocTransport(getToken, fetchImpl = fetch) {
     try {
       response = await fetchImpl(url, { method: methods[path], redirect: 'manual', signal: AbortSignal.timeout(30_000),
         headers: { Authorization: 'Bearer ' + token, Accept: pdf ? 'application/pdf' : 'application/json',
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json; charset=utf-8' }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+          ...(body === undefined ? {} : { 'Content-Type': binary ? 'application/octet-stream' : 'application/json; charset=utf-8' }) },
+        ...(body === undefined ? {} : { body: binary ? body : JSON.stringify(body) }) })
     } catch { throw new Error('Нет ответа от API Диадока. Проверьте соединение; автоматического повтора нет.') }
     if (response.status !== 200) {
       await response.body?.cancel()
@@ -182,8 +192,8 @@ export function makeExternalEdo(state, queue, artifacts, secret, factory = creat
       state.assertCurrent()
       return { summary: 'Настроенные отдельные подключения ЭДО. Доступ API ещё нужно проверить.', data: {
         accounts: Object.entries(state.policy).map(([account, config]) => ({ account, ...config, accessVerified: false,
-          signingAvailable: false, sendingAvailable: false })),
-        note: 'Здесь реализован отдельный Диадок: чтение и PDF. 1С-ЭДО/СБИС пока доступны только как профили серверного адаптера.',
+          draftImportAvailable: config.operations.includes('draft.create'), signingAvailable: false, sendingAvailable: false })),
+        note: 'Отдельный Диадок: чтение, PDF и подтверждённый импорт XML в неподписанный черновик. Подпись и отправка — человеком в кабинете. 1С-ЭДО/СБИС — только профили серверного адаптера.',
       } }
     },
     async diagnose(account) {
